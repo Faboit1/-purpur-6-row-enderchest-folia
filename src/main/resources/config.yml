@@ -8,3 +8,11 @@
 # whatever was in rows 4-6 is gone at each player's next save. Purpur behaves the
 # same way. Empty rows 4-6 first if you plan to turn this off.
 six-rows: true
+
+# Logs what each joining player's saved ender chest actually contained: how many
+# entries were in the data, and which slot each one is for. Useful when rows are
+# going missing - slot numbers reaching into the 27-53 range mean the data is on
+# disk and the plugin is failing to put it back, while numbers stopping at 26 mean
+# it never got saved in the first place. Noisy; leave off unless you are chasing
+# something.
+debug: false

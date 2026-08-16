@@ -92,6 +92,7 @@ final class Nms {
     private volatile Method setActiveChest;
     private volatile Method getBlockEntity;
     private volatile Method getContainerSize;
+    private volatile Method compoundKeySet;
 
     private Nms(
         Field sizeField,
@@ -500,6 +501,42 @@ final class Nms {
     /** {@code CompoundTag#get(String)}; {@code null} when the key is absent. */
     Object tag(Object compoundTag, String key) throws ReflectiveOperationException {
         return this.compoundGet.invoke(compoundTag, key);
+    }
+
+    /** {@code CompoundTag#keySet()} — used to find a key whose exact spelling is not known. */
+    @SuppressWarnings("unchecked")
+    Iterable<String> tagKeys(Object compoundTag) throws ReflectiveOperationException {
+        Method keys = this.compoundKeySet;
+        if (keys == null) {
+            this.compoundKeySet = keys = compoundTag.getClass().getMethod("keySet");
+        }
+        return (Iterable<String>) keys.invoke(compoundTag);
+    }
+
+    /**
+     * Walks an NBT list, whatever it turns out to be.
+     *
+     * <p>{@code ListTag} has extended {@code AbstractList} for a long time, so the fast path is just a
+     * cast. The fallback exists because the alternative is a silent empty result: if this ever stops
+     * being {@link Iterable}, treating it as an empty list would look exactly like an empty ender
+     * chest, and rows 4-6 would be dropped without a word.
+     */
+    List<Object> listEntries(Object listTag) throws ReflectiveOperationException {
+        if (listTag instanceof Iterable<?> iterable) {
+            List<Object> entries = new java.util.ArrayList<>();
+            for (Object entry : iterable) {
+                entries.add(entry);
+            }
+            return entries;
+        }
+        Method size = listTag.getClass().getMethod("size");
+        Method get = listTag.getClass().getMethod("get", int.class);
+        int count = (Integer) size.invoke(listTag);
+        List<Object> entries = new java.util.ArrayList<>(count);
+        for (int index = 0; index < count; index++) {
+            entries.add(get.invoke(listTag, index));
+        }
+        return entries;
     }
 
     /**

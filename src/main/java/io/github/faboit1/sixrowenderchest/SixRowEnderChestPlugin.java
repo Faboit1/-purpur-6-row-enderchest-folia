@@ -50,7 +50,11 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
             return;
         }
 
-        this.store = new EnderChestStore(this.nms, getLogger(), getDataFolder().toPath());
+        boolean debug = getConfig().getBoolean("debug", false);
+        if (debug) {
+            getLogger().info("debug is on: every join will report what the playerdata contained.");
+        }
+        this.store = new EnderChestStore(this.nms, getLogger(), getDataFolder().toPath(), debug);
         getServer().getPluginManager().registerEvents(this, this);
     }
 
