@@ -188,6 +188,7 @@ final class EnderChestStore {
         return slot == null ? -1 : Nms.numeric(slot);
     }
 
+    @SuppressWarnings("deprecation") // Bukkit#getUnsafe is the only way to ask for the data version.
     private void warnOnDataVersionMismatch(Player player, Object root) throws ReflectiveOperationException {
         Object stored = this.nms.tag(root, "DataVersion");
         if (stored == null) {

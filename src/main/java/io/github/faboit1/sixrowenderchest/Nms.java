@@ -292,10 +292,13 @@ final class Nms {
         Object container = enderChestContainer(player);
         Object serverPlayer = serverPlayer(player);
 
-        Object blockEntity = chest == null ? null : enderChestBlockEntity(chest);
         Method activeChest = this.setActiveChest;
         if (activeChest == null) {
-            this.setActiveChest = activeChest = findSingleArg(container.getClass(), "setActiveChest");
+            this.setActiveChest = activeChest = findSingleArg(container.getClass(), "setActiveChest", null);
+        }
+        Object blockEntity = chest == null ? null : enderChestBlockEntity(chest);
+        if (blockEntity != null && !activeChest.getParameterTypes()[0].isInstance(blockEntity)) {
+            blockEntity = null; // The block changed out from under the interaction.
         }
         // Must happen before the menu is built: ChestMenu's constructor triggers startOpen, and the
         // container only forwards that to the block entity if the active chest is already pinned.
@@ -306,7 +309,8 @@ final class Nms {
 
         Method open = this.openMenu;
         if (open == null) {
-            this.openMenu = open = findSingleArg(serverPlayer.getClass(), "openMenu");
+            this.openMenu = open =
+                findSingleArg(serverPlayer.getClass(), "openMenu", this.simpleMenuProvider.getDeclaringClass());
         }
         Object result = open.invoke(serverPlayer, menuProvider);
         boolean opened = result instanceof java.util.OptionalInt optional && optional.isPresent();
@@ -367,14 +371,23 @@ final class Nms {
         Object pos = this.blockPos.newInstance(chest.getX(), chest.getY(), chest.getZ());
         Method getter = this.getBlockEntity;
         if (getter == null) {
-            this.getBlockEntity = getter = findSingleArg(level.getClass(), "getBlockEntity");
+            this.getBlockEntity =
+                getter = findSingleArg(level.getClass(), "getBlockEntity", this.blockPos.getDeclaringClass());
         }
         return getter.invoke(level, pos);
     }
 
-    private static Method findSingleArg(Class<?> owner, String name) throws NoSuchMethodException {
+    /**
+     * Finds a one-argument method by name, optionally requiring that it accepts {@code argType}.
+     * The type check disambiguates overloads, whose order from {@link Class#getMethods()} is
+     * unspecified.
+     */
+    private static Method findSingleArg(Class<?> owner, String name, Class<?> argType)
+        throws NoSuchMethodException {
         for (Method method : owner.getMethods()) {
-            if (method.getName().equals(name) && method.getParameterCount() == 1) {
+            if (method.getName().equals(name)
+                && method.getParameterCount() == 1
+                && (argType == null || method.getParameterTypes()[0].isAssignableFrom(argType))) {
                 return method;
             }
         }

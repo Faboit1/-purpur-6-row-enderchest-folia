@@ -146,7 +146,7 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
 
     private void awardStatistic(Player player) {
         try {
-            player.incrementStatistic(Statistic.OPEN_ENDERCHEST);
+            player.incrementStatistic(Statistic.ENDERCHEST_OPENED);
         } catch (LinkageError | RuntimeException ignored) {
             // Statistic bookkeeping is not worth breaking an open over.
         }
