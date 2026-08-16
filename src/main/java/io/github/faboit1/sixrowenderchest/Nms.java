@@ -91,6 +91,7 @@ final class Nms {
     private volatile Method openMenu;
     private volatile Method setActiveChest;
     private volatile Method getBlockEntity;
+    private volatile Method getContainerSize;
 
     private Nms(
         Field sizeField,
@@ -290,6 +291,24 @@ final class Nms {
 
     int containerSize(Object container) throws ReflectiveOperationException {
         return this.sizeField.getInt(container);
+    }
+
+    /**
+     * The size the container <em>reports</em>, via the real {@code getContainerSize()} call rather than
+     * the field behind it.
+     *
+     * <p>Worth checking separately: {@code PlayerEnderChestContainer#storeAsSlots} bounds its write
+     * loop by this method, so this — not the field — decides how many slots the server persists. If a
+     * fork overrides it (Purpur does, to implement per-permission row counts) or computes it from
+     * something the widening did not touch, everything looks right in-game and rows 4-6 are silently
+     * dropped at the next save.
+     */
+    int reportedContainerSize(Object container) throws ReflectiveOperationException {
+        Method getter = this.getContainerSize;
+        if (getter == null) {
+            this.getContainerSize = getter = container.getClass().getMethod("getContainerSize");
+        }
+        return (Integer) getter.invoke(container);
     }
 
     /**

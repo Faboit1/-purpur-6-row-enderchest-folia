@@ -63,6 +63,9 @@ final class EnderChestStore {
     /** Parsed playerdata, read off-thread during pre-login and claimed at join. */
     private final Map<UUID, Snapshot> snapshots = new ConcurrentHashMap<>();
 
+    /** The size warning is about the server build, not the player — say it once, not per join. */
+    private volatile boolean sizeMismatchLogged;
+
     private record Snapshot(Object root, long readAt) {}
 
     EnderChestStore(Nms nms, Logger logger, Path pluginDirectory) {
@@ -215,6 +218,7 @@ final class EnderChestStore {
         // Grow first, then fill: the restore writes directly into the widened backing list.
         try {
             this.nms.resizeToSixRows(container);
+            verifyPersistable(container);
         } catch (ReflectiveOperationException | RuntimeException e) {
             this.logger.log(Level.SEVERE, "Could not widen the ender chest of " + player.getName(), e);
             return false;
@@ -246,20 +250,37 @@ final class EnderChestStore {
         int restored = 0;
         int recovered = 0;
         int failed = 0;
+        int upperEntries = 0;
+        int unreadableSlots = 0;
         try {
             Object enderItems = this.nms.tag(root, "EnderItems");
+            if (enderItems == null) {
+                return; // No ender chest data at all — an untouched chest, which is normal.
+            }
             if (!(enderItems instanceof Iterable<?> entries)) {
-                return; // No ender chest data at all.
+                // Never expected. Silence here would look exactly like an empty ender chest.
+                this.logger.severe("EnderItems in the playerdata of " + player.getName() + " is a "
+                    + enderItems.getClass().getName() + ", which this plugin cannot walk. Rows 4-6"
+                    + " cannot be restored on this server build.");
+                backup(player, "unwalkable");
+                return;
             }
             // Decided up front: filling row 1 must not change how row 2 is judged.
             boolean lowerRowsLost = lowerRowsEmpty(container);
 
             for (Object entry : entries) {
                 int slot = slotOf(entry);
-                if (slot < 0 || slot >= Nms.SIX_ROWS) {
+                if (slot < 0) {
+                    unreadableSlots++;
+                    continue;
+                }
+                if (slot >= Nms.SIX_ROWS) {
                     continue;
                 }
                 boolean lower = slot < Nms.THREE_ROWS;
+                if (!lower) {
+                    upperEntries++;
+                }
                 if (lower && !lowerRowsLost) {
                     continue; // The server loaded rows 1-3 itself; leave them alone.
                 }
@@ -286,6 +307,18 @@ final class EnderChestStore {
                 + " could not be decoded and will be lost on the next save.");
             backup(player, "undecodable");
         }
+        if (unreadableSlots > 0) {
+            this.logger.severe(unreadableSlots + " EnderItems entr(ies) for " + player.getName()
+                + " carry no slot index this plugin recognises, so they cannot be placed. This is a"
+                + " playerdata format this build does not handle.");
+            backup(player, "unknown-slot-key");
+        }
+        if (upperEntries > 0 && restored == 0) {
+            this.logger.severe("The playerdata of " + player.getName() + " has " + upperEntries
+                + " item(s) in rows 4-6 but none of them could be restored; they will be lost at the"
+                + " next save.");
+            backup(player, "unrestorable");
+        }
         if (recovered > 0) {
             // Loud on purpose: the server should have loaded these and did not.
             this.logger.warning("The server loaded no rows 1-3 for " + player.getName()
@@ -295,6 +328,28 @@ final class EnderChestStore {
             int count = restored;
             this.logger.fine(() -> "Restored " + count + " item(s) into rows 4-6 for " + player.getName());
         }
+    }
+
+    /**
+     * Checks that the widened container will actually be <em>saved</em> at its new size.
+     *
+     * <p>{@code storeAsSlots} bounds its write loop by {@code getContainerSize()}, so that call — not
+     * the field the widening sets — decides how many slots reach the disk. If the two disagree, the
+     * chest shows six rows, the player fills them, and the save writes 27 slots: rows 4-6 come back
+     * empty on the next login, every login, with nothing in the log to explain it. Checked once per
+     * player rather than assumed, because it is the difference between working and quietly eating
+     * items.
+     */
+    private void verifyPersistable(Object container) throws ReflectiveOperationException {
+        int reported = this.nms.reportedContainerSize(container);
+        if (reported == Nms.SIX_ROWS || this.sizeMismatchLogged) {
+            return;
+        }
+        this.sizeMismatchLogged = true;
+        this.logger.severe("This server reports an ender chest size of " + reported + " even after it was"
+            + " widened to " + Nms.SIX_ROWS + ", which means it will only ever save " + reported
+            + " slots. Anything players put below that is lost at the next save. Disabling the plugin"
+            + " and reporting this server build would be wise.");
     }
 
     /** Whether the container's first three rows are completely empty. */
