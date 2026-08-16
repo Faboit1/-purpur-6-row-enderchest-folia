@@ -75,6 +75,9 @@ final class Nms {
     /** {@code PiglinAi#angerNearbyPiglins(...)} — cosmetic, so this one is allowed to be absent. */
     private final Method angerNearbyPiglins;
 
+    /** The live {@code MinecraftServer}, used to ask where playerdata actually lives. */
+    private final Object minecraftServer;
+
     /** {@code DataFixers.getDataFixer()}, or {@code null} if the data fixer could not be reached. */
     private final Object dataFixer;
     /** The {@code DataFixTypes.PLAYER} enum constant. */
@@ -113,6 +116,7 @@ final class Nms {
         Method codecParse,
         Method dataResultResult,
         Method angerNearbyPiglins,
+        Object minecraftServer,
         Object[] dataFixer
     ) {
         this.sizeField = sizeField;
@@ -133,6 +137,7 @@ final class Nms {
         this.codecParse = codecParse;
         this.dataResultResult = dataResultResult;
         this.angerNearbyPiglins = angerNearbyPiglins;
+        this.minecraftServer = minecraftServer;
         this.dataFixer = dataFixer == null ? null : dataFixer[0];
         this.playerFixType = dataFixer == null ? null : dataFixer[1];
         this.updateToCurrentVersion = dataFixer == null ? null : (Method) dataFixer[2];
@@ -207,6 +212,7 @@ final class Nms {
             codec.getMethod("parse", dynamicOps, Object.class),
             dataResult.getMethod("result"),
             findPiglinAnger(),
+            minecraftServer,
             findDataFixer(compoundTag)
         );
     }
@@ -501,6 +507,33 @@ final class Nms {
     /** {@code CompoundTag#get(String)}; {@code null} when the key is absent. */
     Object tag(Object compoundTag, String key) throws ReflectiveOperationException {
         return this.compoundGet.invoke(compoundTag, key);
+    }
+
+    /**
+     * The directory the server itself reads and writes playerdata in.
+     *
+     * <p>Asked rather than guessed. Deriving it from the first world's folder happens to be right on a
+     * default setup and quietly wrong on anything that moves the world directory around — and being
+     * wrong here does not fail, it just finds no file, restores nothing, and leaves rows 4-6 to be
+     * overwritten. {@code PlayerDataStorage#getPlayerDir} is what the server's own loader uses.
+     */
+    Path serverPlayerDataDirectory() throws ReflectiveOperationException {
+        Object playerList = this.minecraftServer.getClass().getMethod("getPlayerList").invoke(this.minecraftServer);
+        for (Class<?> type = playerList.getClass(); type != null; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (!field.getType().getName().endsWith("PlayerDataStorage")) {
+                    continue;
+                }
+                field.setAccessible(true);
+                Object storage = field.get(playerList);
+                if (storage == null) {
+                    continue;
+                }
+                Object dir = storage.getClass().getMethod("getPlayerDir").invoke(storage);
+                return dir instanceof java.io.File file ? file.toPath() : (Path) dir;
+            }
+        }
+        throw new NoSuchFieldException("PlayerList has no PlayerDataStorage field");
     }
 
     /** {@code CompoundTag#keySet()} — used to find a key whose exact spelling is not known. */
