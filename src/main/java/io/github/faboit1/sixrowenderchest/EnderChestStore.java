@@ -9,6 +9,8 @@ import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -99,42 +101,40 @@ final class EnderChestStore {
      * plugin has to survive. ({@code .offline-read} is the name the server renames it to once it has
      * read it, so a join-time retry can still find it.)
      *
-     * @return the first candidate that exists, or {@code null} if the player has no data yet
+     * @return every candidate that exists on disk, best first; empty if the player has no data yet
      */
-    private Path locate(UUID uuid, String name) {
-        Path real = this.playerDataDirectory.resolve(uuid + ".dat");
-        if (Files.isRegularFile(real)) {
-            return real;
-        }
-        Path old = this.playerDataDirectory.resolve(uuid + ".dat_old");
-        if (Files.isRegularFile(old)) {
-            return old;
-        }
+    private List<Path> locate(UUID uuid, String name) {
+        List<Path> names = new ArrayList<>(5);
+        names.add(this.playerDataDirectory.resolve(uuid + ".dat"));
+        names.add(this.playerDataDirectory.resolve(uuid + ".dat_old"));
         if (name != null && Bukkit.getOnlineMode()) {
             UUID offline = UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(StandardCharsets.UTF_8));
             for (String suffix : new String[] { ".dat", ".dat_old", ".dat.offline-read" }) {
-                Path candidate = this.playerDataDirectory.resolve(offline + suffix);
-                if (Files.isRegularFile(candidate)) {
-                    return candidate;
-                }
+                names.add(this.playerDataDirectory.resolve(offline + suffix));
             }
         }
-        return null;
+        names.removeIf(path -> !Files.isRegularFile(path));
+        return names;
     }
 
+    /**
+     * Reads the first candidate that actually parses.
+     *
+     * <p>Falling through on a parse failure rather than only on a missing file is the whole point of
+     * {@code .dat_old} — the server keeps that copy so a half-written {@code .dat} is survivable, and
+     * it tries the copy in exactly this situation. Stopping at the first existing-but-corrupt file
+     * would give up on data the server itself would have recovered.
+     */
     private Object read(UUID uuid, String name) {
-        Path file = locate(uuid, name);
-        if (file == null) {
-            return null; // First join: nothing to restore, and nothing to lose.
+        for (Path file : locate(uuid, name)) {
+            try {
+                return upgrade(uuid, this.nms.readPlayerData(file));
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                this.logger.log(Level.WARNING, "Could not read " + file.getFileName() + " for " + uuid
+                    + "; trying the next copy.", e);
+            }
         }
-        Object root;
-        try {
-            root = this.nms.readPlayerData(file);
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            this.logger.log(Level.WARNING, "Could not read playerdata for " + uuid, e);
-            return null;
-        }
-        return upgrade(uuid, root);
+        return null; // First join, or nothing on disk parsed.
     }
 
     /**
@@ -221,8 +221,8 @@ final class EnderChestStore {
         }
 
         if (root != null) {
-            restoreUpperRows(player, container, root);
-        } else if (locate(uuid, player.getName()) != null) {
+            restore(player, container, root);
+        } else if (!locate(uuid, player.getName()).isEmpty()) {
             // The file exists but would not parse. The container is now 54 slots wide, so the next
             // save rewrites EnderItems and anything that was in rows 4-6 goes with it. Keep a copy.
             backup(player, "unreadable");
@@ -233,47 +233,78 @@ final class EnderChestStore {
     /**
      * Re-reads the {@code EnderItems} entries the vanilla loader threw away.
      *
-     * <p>Only slots 27 and up are touched. Rows 1-3 are left exactly as the server loaded them, so if
-     * another plugin has already changed them during login, that change wins rather than being
-     * silently reverted to the on-disk copy.
+     * <p>Rows 4-6 are always restored — the loader ran against a 27-slot container and dropped them.
+     * Rows 1-3 are normally left exactly as the server loaded them, so if another plugin changed them
+     * during login, that change wins rather than being silently reverted to the on-disk copy. They are
+     * only filled in when the container's first three rows are <em>entirely</em> empty while the file
+     * says they should not be, which is what a failed load looks like and is not something an ordinary
+     * mid-login edit produces. That case is rare but real: it is how a normal three-row ender chest
+     * would otherwise come across empty when the server read a different copy of the playerdata than
+     * this plugin did, or gave up on the file altogether.
      */
-    private void restoreUpperRows(Player player, Object container, Object root) {
+    private void restore(Player player, Object container, Object root) {
         int restored = 0;
+        int recovered = 0;
         int failed = 0;
         try {
             Object enderItems = this.nms.tag(root, "EnderItems");
             if (!(enderItems instanceof Iterable<?> entries)) {
                 return; // No ender chest data at all.
             }
+            // Decided up front: filling row 1 must not change how row 2 is judged.
+            boolean lowerRowsLost = lowerRowsEmpty(container);
 
             for (Object entry : entries) {
                 int slot = slotOf(entry);
-                if (slot < Nms.THREE_ROWS || slot >= Nms.SIX_ROWS) {
+                if (slot < 0 || slot >= Nms.SIX_ROWS) {
                     continue;
+                }
+                boolean lower = slot < Nms.THREE_ROWS;
+                if (lower && !lowerRowsLost) {
+                    continue; // The server loaded rows 1-3 itself; leave them alone.
                 }
                 Optional<Object> stack = this.nms.decodeItem(entry);
                 if (stack.isPresent()) {
                     this.nms.setSlot(container, slot, stack.get());
+                    if (lower) {
+                        recovered++;
+                        continue;
+                    }
                     restored++;
                 } else {
                     failed++;
                 }
             }
         } catch (ReflectiveOperationException | RuntimeException e) {
-            this.logger.log(Level.SEVERE, "Failed restoring ender chest rows 4-6 for " + player.getName(), e);
+            this.logger.log(Level.SEVERE, "Failed restoring the ender chest of " + player.getName(), e);
             backup(player, "error");
             return;
         }
 
         if (failed > 0) {
-            this.logger.severe(failed + " item(s) in rows 4-6 of " + player.getName()
-                + "'s ender chest could not be decoded and will be lost on the next save.");
+            this.logger.severe(failed + " item(s) in the ender chest of " + player.getName()
+                + " could not be decoded and will be lost on the next save.");
             backup(player, "undecodable");
+        }
+        if (recovered > 0) {
+            // Loud on purpose: the server should have loaded these and did not.
+            this.logger.warning("The server loaded no rows 1-3 for " + player.getName()
+                + " but their playerdata has " + recovered + " item(s) there; restored from the file.");
         }
         if (restored > 0) {
             int count = restored;
             this.logger.fine(() -> "Restored " + count + " item(s) into rows 4-6 for " + player.getName());
         }
+    }
+
+    /** Whether the container's first three rows are completely empty. */
+    private boolean lowerRowsEmpty(Object container) throws ReflectiveOperationException {
+        for (int slot = 0; slot < Nms.THREE_ROWS; slot++) {
+            if (!this.nms.isSlotEmpty(container, slot)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private int slotOf(Object entry) throws ReflectiveOperationException {
@@ -288,10 +319,11 @@ final class EnderChestStore {
     /** Copies the raw playerdata file aside so nothing is unrecoverable when a restore goes wrong. */
     private void backup(Player player, String reason) {
         UUID uuid = player.getUniqueId();
-        Path source = locate(uuid, player.getName());
-        if (source == null) {
+        List<Path> sources = locate(uuid, player.getName());
+        if (sources.isEmpty()) {
             return;
         }
+        Path source = sources.get(0);
         try {
             Files.createDirectories(this.recoveryDirectory);
             Path target = this.recoveryDirectory.resolve(

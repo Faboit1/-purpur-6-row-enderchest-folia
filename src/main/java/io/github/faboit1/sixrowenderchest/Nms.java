@@ -41,6 +41,8 @@ final class Nms {
     private final Method withSize;
     /** {@code ItemStack.EMPTY}. */
     private final Object emptyStack;
+    /** {@code ItemStack#isEmpty()}. */
+    private final Method itemStackIsEmpty;
 
     /** {@code ChestMenu#sixRows(int, Inventory, Container)}. */
     private final Method sixRows;
@@ -95,6 +97,7 @@ final class Nms {
         Field itemsField,
         Method withSize,
         Object emptyStack,
+        Method itemStackIsEmpty,
         Method sixRows,
         Class<?> menuConstructorType,
         Constructor<?> simpleMenuProvider,
@@ -114,6 +117,7 @@ final class Nms {
         this.itemsField = itemsField;
         this.withSize = withSize;
         this.emptyStack = emptyStack;
+        this.itemStackIsEmpty = itemStackIsEmpty;
         this.sixRows = sixRows;
         this.menuConstructorType = menuConstructorType;
         this.simpleMenuProvider = simpleMenuProvider;
@@ -187,6 +191,7 @@ final class Nms {
             items,
             nonNullList.getMethod("withSize", int.class, Object.class),
             empty.get(null),
+            itemStack.getMethod("isEmpty"),
             chestMenu.getMethod("sixRows", int.class, inventory, container),
             menuConstructor,
             simpleMenuProvider.getConstructor(menuConstructor, component),
@@ -312,7 +317,14 @@ final class Nms {
         this.sizeField.setInt(container, SIX_ROWS);
     }
 
-    /** Writes a decoded stack straight into the backing list. Only used while restoring rows 4-6. */
+    /** Whether the container's slot holds nothing, read straight off the backing list. */
+    boolean isSlotEmpty(Object container, int slot) throws ReflectiveOperationException {
+        @SuppressWarnings("unchecked")
+        List<Object> backing = (List<Object>) this.itemsField.get(container);
+        return (Boolean) this.itemStackIsEmpty.invoke(backing.get(slot));
+    }
+
+    /** Writes a decoded stack straight into the backing list. Only used while restoring. */
     void setSlot(Object container, int slot, Object itemStack) throws ReflectiveOperationException {
         @SuppressWarnings("unchecked")
         List<Object> backing = (List<Object>) this.itemsField.get(container);

@@ -91,9 +91,26 @@ anything another plugin has already cancelled or denied all behave as before.
 opens six rows on its own — CraftBukkit's `CraftContainer.getNotchInventoryType` already picks the
 menu type from the inventory's size, so Purpur's third edit needs no equivalent here.
 
-## Migrating from Purpur
+## Migrating an existing world
 
-**Copy the world across and start the server. That is the whole migration.**
+**Copy the world across and start the server. That is the whole migration**, whether the world comes
+from Purpur or from a plain server.
+
+### From a normal three-row ender chest
+
+Nothing special happens, and nothing needs to. Rows 1-3 live in the same `EnderItems` list they always
+did; the server loads them itself, before this plugin is involved at all. The plugin then widens the
+container from 27 slots to 54, keeping what is already in it, and rows 4-6 start out empty. Players
+keep everything they had and gain three empty rows underneath.
+
+Rows 1-3 are deliberately left exactly as the server loaded them rather than re-read from disk, so a
+plugin that adjusts someone's ender chest during login isn't silently overruled. The one exception is
+a backstop: if the container's first three rows come up *completely* empty while the playerdata says
+they should not be, the plugin fills them from the file and logs a warning. That is what a failed load
+looks like — the server reading a different copy of the playerdata than this plugin found, or giving
+up on the file — and it is not something an ordinary mid-login edit produces.
+
+### From Purpur
 
 Purpur keeps all six rows in the ordinary vanilla `EnderItems` list in `playerdata/<uuid>.dat` — it
 writes no ender chest data of its own anywhere else (see the patch above: `storeAsSlots` just runs to
@@ -116,6 +133,11 @@ Two things worth knowing:
 
 If the plugin ever cannot decode something, it does not quietly drop it: it copies the raw `.dat` to
 `plugins/SixRowEnderChest/recovery/` and logs loudly before anything is overwritten.
+
+When a playerdata file is damaged, the plugin works down the same list of copies the server does —
+`<uuid>.dat`, then the `.dat_old` written by the previous save, then (on an online-mode server whose
+real file is missing) the offline-UUID file — trying each until one parses, rather than giving up on
+the first one that exists.
 
 Purpur's `enderchest-permission-rows` has no equivalent here — this plugin gives everyone six rows.
 Players who were limited to fewer rows on Purpur still keep whatever was stored above their limit
