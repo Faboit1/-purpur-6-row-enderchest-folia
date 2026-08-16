@@ -63,7 +63,7 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
         if (event.getLoginResult() == AsyncPlayerPreLoginEvent.Result.ALLOWED) {
-            this.store.prefetch(event.getUniqueId());
+            this.store.prefetch(event.getUniqueId(), event.getName());
         }
     }
 

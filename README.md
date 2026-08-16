@@ -91,6 +91,37 @@ anything another plugin has already cancelled or denied all behave as before.
 opens six rows on its own — CraftBukkit's `CraftContainer.getNotchInventoryType` already picks the
 menu type from the inventory's size, so Purpur's third edit needs no equivalent here.
 
+## Migrating from Purpur
+
+**Copy the world across and start the server. That is the whole migration.**
+
+Purpur keeps all six rows in the ordinary vanilla `EnderItems` list in `playerdata/<uuid>.dat` — it
+writes no ender chest data of its own anywhere else (see the patch above: `storeAsSlots` just runs to
+54 instead of 27). This plugin reads that exact same list. So a Purpur world dropped onto Canvas
+already contains everyone's rows 4-6, and each player gets them back on their first join.
+
+Nothing to export, no conversion command, no separate database. It also works in reverse — go back to
+Purpur later and the rows are still where Purpur expects them.
+
+Two things worth knowing:
+
+* **Install the plugin before players log in on the new server.** Without it, the first join loads a
+  27-slot container and the first save rewrites `EnderItems` with three rows' worth of items — rows
+  4-6 are gone at that point, and no plugin can get them back. If that has already happened, restore
+  those players' `.dat` files from a backup of the Purpur world first.
+* **Migrating across a Minecraft version at the same time is fine.** The plugin runs the game's own
+  data fixer (`DataFixTypes.PLAYER`) over the file before reading rows 4-6, the same call the server
+  makes for rows 1-3, so item NBT from an older version is upgraded rather than discarded. Coming from
+  a Purpur old enough to predate the 1.20.5 item component rewrite works for that reason.
+
+If the plugin ever cannot decode something, it does not quietly drop it: it copies the raw `.dat` to
+`plugins/SixRowEnderChest/recovery/` and logs loudly before anything is overwritten.
+
+Purpur's `enderchest-permission-rows` has no equivalent here — this plugin gives everyone six rows.
+Players who were limited to fewer rows on Purpur still keep whatever was stored above their limit
+(Purpur persists all 54 slots when `persist-hidden-rows` is on), so they gain access to it rather than
+losing it.
+
 ## Compatibility
 
 * **Canvas, Folia, Paper, and forks of them**, Minecraft **1.21.4 and newer** (tested surface:
@@ -138,9 +169,10 @@ As a safety net, if the plugin ever widens a chest whose rows 4-6 it could not r
 file, or item NBT from an older Minecraft version), it copies the raw `.dat` to
 `plugins/SixRowEnderChest/recovery/` and logs loudly before anything is overwritten.
 
-One related note: after a Minecraft version upgrade, rows 4-6 are read without running the data
-fixer, so the first join on a new version logs a warning if a player's file is still on the old data
-version. Rows 1-3 are unaffected (the server fixes those itself).
+After a Minecraft version upgrade, rows 4-6 are put through the game's data fixer before being read,
+the same as the server does for rows 1-3, and the first join on the new version logs a line saying so.
+Only if a server build exposes no data fixer at all does it fall back to reading them as-is, with a
+warning.
 
 ## Alternative
 

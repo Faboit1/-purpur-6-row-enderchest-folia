@@ -73,6 +73,13 @@ final class Nms {
     /** {@code PiglinAi#angerNearbyPiglins(...)} — cosmetic, so this one is allowed to be absent. */
     private final Method angerNearbyPiglins;
 
+    /** {@code DataFixers.getDataFixer()}, or {@code null} if the data fixer could not be reached. */
+    private final Object dataFixer;
+    /** The {@code DataFixTypes.PLAYER} enum constant. */
+    private final Object playerFixType;
+    /** {@code DataFixTypes#updateToCurrentVersion(DataFixer, CompoundTag, int)}. */
+    private final Method updateToCurrentVersion;
+
     // Resolved from a live instance the first time it is needed, then cached. These live on
     // CraftBukkit classes whose package is version-suffixed on some server software.
     private volatile Method craftPlayerGetHandle;
@@ -100,7 +107,8 @@ final class Nms {
         Object registryOps,
         Method codecParse,
         Method dataResultResult,
-        Method angerNearbyPiglins
+        Method angerNearbyPiglins,
+        Object[] dataFixer
     ) {
         this.sizeField = sizeField;
         this.itemsField = itemsField;
@@ -119,6 +127,9 @@ final class Nms {
         this.codecParse = codecParse;
         this.dataResultResult = dataResultResult;
         this.angerNearbyPiglins = angerNearbyPiglins;
+        this.dataFixer = dataFixer == null ? null : dataFixer[0];
+        this.playerFixType = dataFixer == null ? null : dataFixer[1];
+        this.updateToCurrentVersion = dataFixer == null ? null : (Method) dataFixer[2];
     }
 
     // ------------------------------------------------------------------ bootstrap
@@ -188,7 +199,8 @@ final class Nms {
             registryOps,
             codec.getMethod("parse", dynamicOps, Object.class),
             dataResult.getMethod("result"),
-            findPiglinAnger()
+            findPiglinAnger(),
+            findDataFixer(compoundTag)
         );
     }
 
@@ -213,6 +225,40 @@ final class Nms {
             }
         } catch (ClassNotFoundException ignored) {
             // Not fatal — piglin aggro is cosmetic.
+        }
+        return null;
+    }
+
+    /**
+     * Resolves the game's own data fixer, so playerdata written by an older Minecraft version can be
+     * upgraded before rows 4-6 are read out of it.
+     *
+     * <p>This mirrors what {@code PlayerDataStorage#load} does to the same file — the server runs
+     * {@code DataFixTypes.PLAYER.updateToCurrentVersion(...)} over the whole player tag, which is how
+     * rows 1-3 survive a version jump. Reading the file directly skips that, so the plugin has to run
+     * it too or old item NBT in rows 4-6 will not decode.
+     *
+     * @return {@code {DataFixer, DataFixTypes.PLAYER, updateToCurrentVersion}}, or {@code null} if any
+     *     of it is missing — this is a nice-to-have, not a reason to refuse to load
+     */
+    private static Object[] findDataFixer(Class<?> compoundTag) {
+        try {
+            Class<?> dataFixers = Class.forName("net.minecraft.util.datafix.DataFixers");
+            Class<?> dataFixTypes = Class.forName("net.minecraft.util.datafix.DataFixTypes");
+            for (Method method : dataFixTypes.getMethods()) {
+                // The Dynamic-based overload has the same name and arity; match on the tag types.
+                if (method.getName().equals("updateToCurrentVersion")
+                    && method.getParameterCount() == 3
+                    && method.getParameterTypes()[1] == compoundTag
+                    && method.getParameterTypes()[2] == int.class
+                    && method.getReturnType() == compoundTag) {
+                    Object fixer = dataFixers.getMethod("getDataFixer").invoke(null);
+                    Object player = dataFixTypes.getField("PLAYER").get(null);
+                    return new Object[] { fixer, player, method };
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError ignored) {
+            // Fall through: EnderChestStore warns instead of upgrading.
         }
         return null;
     }
@@ -399,6 +445,25 @@ final class Nms {
     /** Reads and decompresses a {@code playerdata/<uuid>.dat} file. Safe to call off the main thread. */
     Object readPlayerData(Path file) throws ReflectiveOperationException {
         return this.readCompressed.invoke(null, file, this.nbtAccounter);
+    }
+
+    /** Whether {@link #upgradePlayerData} can do anything on this server build. */
+    boolean canUpgradePlayerData() {
+        return this.updateToCurrentVersion != null;
+    }
+
+    /**
+     * Runs the vanilla player data fixer over a raw playerdata tag, exactly as the server does when it
+     * loads the same file.
+     *
+     * @param fromVersion the file's {@code DataVersion}, or -1 if it predates that field
+     * @return the upgraded tag, or {@code null} if this server build exposes no data fixer
+     */
+    Object upgradePlayerData(Object root, int fromVersion) throws ReflectiveOperationException {
+        if (this.updateToCurrentVersion == null) {
+            return null;
+        }
+        return this.updateToCurrentVersion.invoke(this.playerFixType, this.dataFixer, root, fromVersion);
     }
 
     /** {@code CompoundTag#get(String)}; {@code null} when the key is absent. */
