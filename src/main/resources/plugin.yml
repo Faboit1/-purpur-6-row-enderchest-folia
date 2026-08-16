@@ -1,0 +1,8 @@
+name: SixRowEnderChest
+version: '${version}'
+main: io.github.faboit1.sixrowenderchest.SixRowEnderChestPlugin
+api-version: '1.21'
+folia-supported: true
+load: POSTWORLD
+description: Six-row ender chests on Folia, Canvas and Paper, matching Purpur's settings.blocks.ender_chest.six-rows.
+website: https://github.com/Faboit1/-purpur-6-row-enderchest-folia
