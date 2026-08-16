@@ -1,0 +1,10 @@
+# SixRowEnderChest
+#
+# The equivalent of Purpur's settings.blocks.ender_chest.six-rows.
+#
+# WARNING before you set this to false (or uninstall the plugin):
+# rows 4-6 live in the player's normal ender chest data. When the chest goes back
+# to three rows, the server rewrites that data with three rows' worth of items and
+# whatever was in rows 4-6 is gone at each player's next save. Purpur behaves the
+# same way. Empty rows 4-6 first if you plan to turn this off.
+six-rows: true
