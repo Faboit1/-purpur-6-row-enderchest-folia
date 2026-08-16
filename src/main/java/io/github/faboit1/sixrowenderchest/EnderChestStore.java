@@ -59,6 +59,8 @@ final class EnderChestStore {
     private final Logger logger;
     private final Path playerDataDirectory;
     private final Path recoveryDirectory;
+    /** When set, every join reports what the playerdata actually contained. Off by default. */
+    private final boolean debug;
 
     /** Parsed playerdata, read off-thread during pre-login and claimed at join. */
     private final Map<UUID, Snapshot> snapshots = new ConcurrentHashMap<>();
@@ -68,9 +70,10 @@ final class EnderChestStore {
 
     private record Snapshot(Object root, long readAt) {}
 
-    EnderChestStore(Nms nms, Logger logger, Path pluginDirectory) {
+    EnderChestStore(Nms nms, Logger logger, Path pluginDirectory, boolean debug) {
         this.nms = nms;
         this.logger = logger;
+        this.debug = debug;
         this.playerDataDirectory = Bukkit.getWorlds().get(0).getWorldFolder().toPath().resolve("playerdata");
         this.recoveryDirectory = pluginDirectory.resolve("recovery");
     }
@@ -257,13 +260,20 @@ final class EnderChestStore {
             if (enderItems == null) {
                 return; // No ender chest data at all — an untouched chest, which is normal.
             }
-            if (!(enderItems instanceof Iterable<?> entries)) {
-                // Never expected. Silence here would look exactly like an empty ender chest.
-                this.logger.severe("EnderItems in the playerdata of " + player.getName() + " is a "
-                    + enderItems.getClass().getName() + ", which this plugin cannot walk. Rows 4-6"
-                    + " cannot be restored on this server build.");
+            List<Object> entries;
+            try {
+                entries = this.nms.listEntries(enderItems);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                // Silence here would look exactly like an empty ender chest.
+                this.logger.log(Level.SEVERE, "EnderItems in the playerdata of " + player.getName()
+                    + " is a " + enderItems.getClass().getName() + ", which this plugin cannot walk."
+                    + " Rows 4-6 cannot be restored on this server build.", e);
                 backup(player, "unwalkable");
                 return;
+            }
+            if (this.debug) {
+                this.logger.info("[debug] " + player.getName() + ": EnderItems holds " + entries.size()
+                    + " entr(ies); slots " + describeSlots(entries));
             }
             // Decided up front: filling row 1 must not change how row 2 is judged.
             boolean lowerRowsLost = lowerRowsEmpty(container);
@@ -352,6 +362,27 @@ final class EnderChestStore {
             + " and reporting this server build would be wise.");
     }
 
+    /**
+     * The slot indices in a set of entries, as read by {@link #slotOf}.
+     *
+     * <p>This is the one line that separates the two ways rows 4-6 can go missing: indices running up
+     * to 53 mean the save wrote them and the restore is at fault, indices stopping at 26 mean they
+     * never reached the disk, and {@code ?} means the entry carries no index this plugin can read.
+     */
+    private String describeSlots(List<Object> entries) {
+        StringBuilder description = new StringBuilder();
+        for (Object entry : entries) {
+            int slot;
+            try {
+                slot = slotOf(entry);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                slot = -1;
+            }
+            description.append(description.isEmpty() ? "" : ",").append(slot < 0 ? "?" : slot);
+        }
+        return description.isEmpty() ? "(none)" : description.toString();
+    }
+
     /** Whether the container's first three rows are completely empty. */
     private boolean lowerRowsEmpty(Object container) throws ReflectiveOperationException {
         for (int slot = 0; slot < Nms.THREE_ROWS; slot++) {
@@ -362,11 +393,26 @@ final class EnderChestStore {
         return true;
     }
 
+    /**
+     * The slot index an {@code EnderItems} entry belongs in, or -1 if it does not say.
+     *
+     * <p>Two spellings are known — {@code Slot} as a byte up to 1.21.4, {@code slot} as an int from
+     * 1.21.5 — but guessing names is how this silently returns nothing on a version that picked a
+     * third. Falling back to a scan of the entry's own keys means the only way to miss the index is
+     * for it not to be called "slot" at all, which is then reported rather than skipped.
+     */
     private int slotOf(Object entry) throws ReflectiveOperationException {
-        // "Slot" (byte) up to 1.21.4, "slot" (int) from 1.21.5 onwards.
         Object slot = this.nms.tag(entry, "Slot");
         if (slot == null) {
             slot = this.nms.tag(entry, "slot");
+        }
+        if (slot == null) {
+            for (String key : this.nms.tagKeys(entry)) {
+                if (key.equalsIgnoreCase("slot")) {
+                    slot = this.nms.tag(entry, key);
+                    break;
+                }
+            }
         }
         return slot == null ? -1 : Nms.numeric(slot);
     }
