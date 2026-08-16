@@ -53,6 +53,11 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
         boolean debug = getConfig().getBoolean("debug", false);
         if (debug) {
             getLogger().info("debug is on: every join will report what the playerdata contained.");
+        } else if (!getConfig().contains("debug")) {
+            // saveDefaultConfig() leaves an existing file alone, so upgrading the jar does not add
+            // new keys. Say so, rather than let someone set an option that is not there.
+            getLogger().info("Your config.yml predates the 'debug' option. To enable diagnostics, add"
+                + " a line reading 'debug: true' to it, or delete the file to regenerate it.");
         }
         this.store = new EnderChestStore(this.nms, getLogger(), getDataFolder().toPath(), debug);
         getServer().getPluginManager().registerEvents(this, this);

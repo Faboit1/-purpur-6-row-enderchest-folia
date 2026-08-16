@@ -74,8 +74,43 @@ final class EnderChestStore {
         this.nms = nms;
         this.logger = logger;
         this.debug = debug;
-        this.playerDataDirectory = Bukkit.getWorlds().get(0).getWorldFolder().toPath().resolve("playerdata");
+        this.playerDataDirectory = resolvePlayerDataDirectory(nms, logger);
         this.recoveryDirectory = pluginDirectory.resolve("recovery");
+        reportEnvironment();
+    }
+
+    private static Path resolvePlayerDataDirectory(Nms nms, Logger logger) {
+        try {
+            return nms.serverPlayerDataDirectory();
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Path guess = Bukkit.getWorlds().get(0).getWorldFolder().toPath().resolve("playerdata");
+            logger.log(Level.WARNING, "Could not ask the server where playerdata lives; falling back to "
+                + guess, e);
+            return guess;
+        }
+    }
+
+    /**
+     * States, once, where the plugin will look for playerdata and whether anything is there.
+     *
+     * <p>Worth a line at startup because getting this wrong is invisible: a directory with no files in
+     * it reads as "every player is joining for the first time", so nothing is restored, nothing is
+     * backed up, and nothing is logged, while rows 4-6 are quietly overwritten at the next save.
+     */
+    private void reportEnvironment() {
+        if (!Files.isDirectory(this.playerDataDirectory)) {
+            this.logger.severe("Playerdata directory " + this.playerDataDirectory + " does not exist."
+                + " Rows 4-6 cannot be restored for anyone, and will be lost at each player's next save.");
+            return;
+        }
+        long files;
+        try (java.util.stream.Stream<Path> listing = Files.list(this.playerDataDirectory)) {
+            files = listing.filter(path -> path.getFileName().toString().endsWith(".dat")).count();
+        } catch (IOException e) {
+            this.logger.log(Level.SEVERE, "Cannot read the playerdata directory " + this.playerDataDirectory, e);
+            return;
+        }
+        this.logger.info("Reading playerdata from " + this.playerDataDirectory + " (" + files + " file(s)).");
     }
 
     /**
@@ -207,7 +242,13 @@ final class EnderChestStore {
         try {
             container = this.nms.enderChestContainer(player);
             if (this.nms.containerSize(container) == Nms.SIX_ROWS) {
-                // Already grown — the plugin was reloaded under a player who never left.
+                // Already grown — the plugin was reloaded under a player who never left. Worth a word
+                // under debug: on a fresh join the container is built at 27, so seeing 54 here means
+                // something else widened it first, and the restore below is being skipped.
+                if (this.debug) {
+                    this.logger.info("[debug] " + player.getName() + ": ender chest was already "
+                        + Nms.SIX_ROWS + " slots before widening; skipping the restore.");
+                }
                 return true;
             }
         } catch (ReflectiveOperationException | RuntimeException e) {
@@ -233,6 +274,14 @@ final class EnderChestStore {
             // The file exists but would not parse. The container is now 54 slots wide, so the next
             // save rewrites EnderItems and anything that was in rows 4-6 goes with it. Keep a copy.
             backup(player, "unreadable");
+        } else if (player.hasPlayedBefore()) {
+            // No file at all for someone who has been here before. Their rows 4-6 are about to be
+            // overwritten with nothing, so this must not pass quietly.
+            this.logger.severe("No playerdata found for " + player.getName() + " in "
+                + this.playerDataDirectory + ", but they have played before. Rows 4-6 cannot be"
+                + " restored and will be lost at their next save.");
+        } else if (this.debug) {
+            this.logger.info("[debug] " + player.getName() + ": no playerdata yet, first join.");
         }
         return true;
     }
@@ -258,7 +307,13 @@ final class EnderChestStore {
         try {
             Object enderItems = this.nms.tag(root, "EnderItems");
             if (enderItems == null) {
-                return; // No ender chest data at all — an untouched chest, which is normal.
+                // Normal for a chest nobody has touched, so not a warning — but it is also what a
+                // renamed key would look like, which is why debug says so explicitly.
+                if (this.debug) {
+                    this.logger.info("[debug] " + player.getName() + ": playerdata has no EnderItems"
+                        + " key. Top-level keys: " + describeKeys(root));
+                }
+                return;
             }
             List<Object> entries;
             try {
@@ -381,6 +436,19 @@ final class EnderChestStore {
             description.append(description.isEmpty() ? "" : ",").append(slot < 0 ? "?" : slot);
         }
         return description.isEmpty() ? "(none)" : description.toString();
+    }
+
+    /** The top-level keys of a tag, so a renamed one is visible rather than merely absent. */
+    private String describeKeys(Object tag) {
+        try {
+            StringBuilder keys = new StringBuilder();
+            for (String key : this.nms.tagKeys(tag)) {
+                keys.append(keys.isEmpty() ? "" : ",").append(key);
+            }
+            return keys.isEmpty() ? "(none)" : keys.toString();
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return "(unreadable: " + e + ")";
+        }
     }
 
     /** Whether the container's first three rows are completely empty. */
