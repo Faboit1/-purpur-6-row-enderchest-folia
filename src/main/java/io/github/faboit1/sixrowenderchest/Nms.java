@@ -288,12 +288,16 @@ final class Nms {
      * very same container object the server persists.
      */
     Object enderChestContainer(Player player) throws ReflectiveOperationException {
-        Object craftInventory = player.getEnderChest();
+        return containerOf(player.getEnderChest());
+    }
+
+    /** The NMS {@code Container} behind any Bukkit inventory. */
+    Object containerOf(org.bukkit.inventory.Inventory inventory) throws ReflectiveOperationException {
         Method getter = this.craftInventoryGetInventory;
         if (getter == null) {
-            this.craftInventoryGetInventory = getter = resolve(craftInventory, "getInventory");
+            this.craftInventoryGetInventory = getter = resolve(inventory, "getInventory");
         }
-        return getter.invoke(craftInventory);
+        return getter.invoke(inventory);
     }
 
     int containerSize(Object container) throws ReflectiveOperationException {
@@ -327,20 +331,25 @@ final class Nms {
      * {@code final} but non-static, which reflection is allowed to write after {@code setAccessible}.
      */
     void resizeToSixRows(Object container) throws ReflectiveOperationException {
+        resizeTo(container, SIX_ROWS);
+    }
+
+    /** Resizes the container in place, preserving whatever fits in the new size. */
+    void resizeTo(Object container, int size) throws ReflectiveOperationException {
         int current = containerSize(container);
-        if (current == SIX_ROWS) {
+        if (current == size) {
             return;
         }
-        Object grown = this.withSize.invoke(null, SIX_ROWS, this.emptyStack);
+        Object resized = this.withSize.invoke(null, size, this.emptyStack);
         @SuppressWarnings("unchecked")
-        List<Object> target = (List<Object>) grown;
+        List<Object> target = (List<Object>) resized;
         @SuppressWarnings("unchecked")
         List<Object> existing = (List<Object>) this.itemsField.get(container);
-        for (int slot = 0; slot < Math.min(current, SIX_ROWS); slot++) {
+        for (int slot = 0; slot < Math.min(current, size); slot++) {
             target.set(slot, existing.get(slot));
         }
-        this.itemsField.set(container, grown);
-        this.sizeField.setInt(container, SIX_ROWS);
+        this.itemsField.set(container, resized);
+        this.sizeField.setInt(container, size);
     }
 
     /** Whether the container's slot holds nothing, read straight off the backing list. */

@@ -7,8 +7,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.StandardCopyOption;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +53,12 @@ final class EnderChestStore {
     /** How long an unclaimed pre-login snapshot is kept before it is treated as abandoned. */
     private static final long SNAPSHOT_TTL_MILLIS = 5 * 60 * 1000L;
 
+    /** Cap on retained pre-read snapshots, so logins that never complete cannot grow the heap. */
+    private static final int MAX_SNAPSHOTS = 256;
+
+    /** Playerdata above this size is not pre-read off-thread. */
+    private static final long MAX_PLAYERDATA_BYTES = 8L * 1024 * 1024;
+
     private final Nms nms;
     private final Logger logger;
     private final Path playerDataDirectory;
@@ -68,12 +72,22 @@ final class EnderChestStore {
     /** The size warning is about the server build, not the player — say it once, not per join. */
     private volatile boolean sizeMismatchLogged;
 
+    /**
+     * Players whose chest could not be widened. Kept so a retry at every right-click does not re-read
+     * their playerdata off the disk each time; cleared when they leave.
+     */
+    private final java.util.Set<UUID> widenFailed = ConcurrentHashMap.newKeySet();
+
+    /** Called once if this server build turns out to be unable to persist a widened chest. */
+    private final Runnable onUnsupported;
+
     private record Snapshot(Object root, long readAt) {}
 
-    EnderChestStore(Nms nms, Logger logger, Path pluginDirectory, boolean debug) {
+    EnderChestStore(Nms nms, Logger logger, Path pluginDirectory, boolean debug, Runnable onUnsupported) {
         this.nms = nms;
         this.logger = logger;
         this.debug = debug;
+        this.onUnsupported = onUnsupported;
         this.playerDataDirectory = resolvePlayerDataDirectory(nms, logger);
         this.recoveryDirectory = pluginDirectory.resolve("recovery");
         reportEnvironment();
@@ -121,15 +135,45 @@ final class EnderChestStore {
      * file at the same time). Failures here are not fatal — {@link #applySixRows} retries inline.
      */
     void prefetch(UUID uuid, String name) {
-        this.snapshots.values().removeIf(snapshot -> System.currentTimeMillis() - snapshot.readAt() > SNAPSHOT_TTL_MILLIS);
+        purgeExpired();
+        if (this.snapshots.size() >= MAX_SNAPSHOTS) {
+            // Under a flood of connections, stop retaining trees entirely; the join reads inline.
+            return;
+        }
+        List<Path> candidates = locate(uuid, name);
+        if (candidates.isEmpty()) {
+            return;
+        }
+        try {
+            if (Files.size(candidates.get(0)) > MAX_PLAYERDATA_BYTES) {
+                this.logger.warning("Playerdata for " + uuid + " is over " + MAX_PLAYERDATA_BYTES
+                    + " bytes, so it is not being pre-read; the join will read it inline instead.");
+                return;
+            }
+        } catch (IOException e) {
+            return; // Vanished between locate and here. The inline read at join deals with it.
+        }
         Object root = read(uuid, name);
         if (root != null) {
             this.snapshots.put(uuid, new Snapshot(root, System.currentTimeMillis()));
         }
     }
 
+    /**
+     * Drops anything held for a player.
+     *
+     * <p>Called when a login does not turn into a join and when a player leaves. Without it a parsed
+     * tag tree sits on the heap until some later prefetch happens to evict it, which is unbounded in
+     * exactly the case that matters: connections that never complete.
+     */
     void forget(UUID uuid) {
         this.snapshots.remove(uuid);
+        this.widenFailed.remove(uuid);
+    }
+
+    private void purgeExpired() {
+        long now = System.currentTimeMillis();
+        this.snapshots.values().removeIf(snapshot -> now - snapshot.readAt() > SNAPSHOT_TTL_MILLIS);
     }
 
     /**
@@ -238,6 +282,9 @@ final class EnderChestStore {
      */
     boolean applySixRows(Player player) {
         UUID uuid = player.getUniqueId();
+        if (this.widenFailed.contains(uuid)) {
+            return false; // Already tried this session; do not re-read their file on every click.
+        }
         Object container;
         try {
             container = this.nms.enderChestContainer(player);
@@ -253,6 +300,7 @@ final class EnderChestStore {
             }
         } catch (ReflectiveOperationException | RuntimeException e) {
             this.logger.log(Level.SEVERE, "Could not reach the ender chest container of " + player.getName(), e);
+            this.widenFailed.add(uuid);
             return false;
         }
 
@@ -262,9 +310,13 @@ final class EnderChestStore {
         // Grow first, then fill: the restore writes directly into the widened backing list.
         try {
             this.nms.resizeToSixRows(container);
-            verifyPersistable(container);
+            if (!verifyPersistable(container)) {
+                this.widenFailed.add(uuid);
+                return false;
+            }
         } catch (ReflectiveOperationException | RuntimeException e) {
             this.logger.log(Level.SEVERE, "Could not widen the ender chest of " + player.getName(), e);
+            this.widenFailed.add(uuid);
             return false;
         }
 
@@ -289,18 +341,13 @@ final class EnderChestStore {
     /**
      * Re-reads the {@code EnderItems} entries the vanilla loader threw away.
      *
-     * <p>Rows 4-6 are always restored — the loader ran against a 27-slot container and dropped them.
-     * Rows 1-3 are normally left exactly as the server loaded them, so if another plugin changed them
-     * during login, that change wins rather than being silently reverted to the on-disk copy. They are
-     * only filled in when the container's first three rows are <em>entirely</em> empty while the file
-     * says they should not be, which is what a failed load looks like and is not something an ordinary
-     * mid-login edit produces. That case is rare but real: it is how a normal three-row ender chest
-     * would otherwise come across empty when the server read a different copy of the playerdata than
-     * this plugin did, or gave up on the file altogether.
+     * <p>Only rows 4-6 are written — the loader ran against a 27-slot container and dropped those.
+     * Rows 1-3 are never touched: the server has already loaded them, and writing them from disk would
+     * overrule any plugin that adjusted the chest during login. They are read, though, as the check
+     * that this file is the same save the server loaded; see {@link #agreesWithContainer}.
      */
     private void restore(Player player, Object container, Object root) {
         int restored = 0;
-        int recovered = 0;
         int failed = 0;
         int upperEntries = 0;
         int unreadableSlots = 0;
@@ -330,8 +377,16 @@ final class EnderChestStore {
                 this.logger.info("[debug] " + player.getName() + ": EnderItems holds " + entries.size()
                     + " entr(ies); slots " + describeSlots(entries));
             }
-            // Decided up front: filling row 1 must not change how row 2 is judged.
-            boolean lowerRowsLost = lowerRowsEmpty(container);
+            if (!agreesWithContainer(container, entries)) {
+                // Not the save the server loaded. Restoring rows 4-6 out of it would put back items
+                // the player has since taken out and still holds: one copy in the chest, one in the
+                // inventory. Refusing costs them rows 4-6 for this join, and is recoverable.
+                this.logger.severe("The playerdata read for " + player.getName() + " disagrees with the"
+                    + " ender chest the server loaded, so it is not the same save. Rows 4-6 are being"
+                    + " left empty rather than restored from a stale copy.");
+                backup(player, "stale-copy");
+                return;
+            }
 
             for (Object entry : entries) {
                 int slot = slotOf(entry);
@@ -339,23 +394,13 @@ final class EnderChestStore {
                     unreadableSlots++;
                     continue;
                 }
-                if (slot >= Nms.SIX_ROWS) {
-                    continue;
+                if (slot < Nms.THREE_ROWS || slot >= Nms.SIX_ROWS) {
+                    continue; // Rows 1-3 belong to the server; it has already loaded them.
                 }
-                boolean lower = slot < Nms.THREE_ROWS;
-                if (!lower) {
-                    upperEntries++;
-                }
-                if (lower && !lowerRowsLost) {
-                    continue; // The server loaded rows 1-3 itself; leave them alone.
-                }
+                upperEntries++;
                 Optional<Object> stack = this.nms.decodeItem(entry);
                 if (stack.isPresent()) {
                     this.nms.setSlot(container, slot, stack.get());
-                    if (lower) {
-                        recovered++;
-                        continue;
-                    }
                     restored++;
                 } else {
                     failed++;
@@ -384,11 +429,6 @@ final class EnderChestStore {
                 + " next save.");
             backup(player, "unrestorable");
         }
-        if (recovered > 0) {
-            // Loud on purpose: the server should have loaded these and did not.
-            this.logger.warning("The server loaded no rows 1-3 for " + player.getName()
-                + " but their playerdata has " + recovered + " item(s) there; restored from the file.");
-        }
         if (restored > 0) {
             int count = restored;
             this.logger.fine(() -> "Restored " + count + " item(s) into rows 4-6 for " + player.getName());
@@ -405,16 +445,23 @@ final class EnderChestStore {
      * player rather than assumed, because it is the difference between working and quietly eating
      * items.
      */
-    private void verifyPersistable(Object container) throws ReflectiveOperationException {
+    private boolean verifyPersistable(Object container) throws ReflectiveOperationException {
         int reported = this.nms.reportedContainerSize(container);
-        if (reported == Nms.SIX_ROWS || this.sizeMismatchLogged) {
-            return;
+        if (reported == Nms.SIX_ROWS) {
+            return true;
         }
-        this.sizeMismatchLogged = true;
-        this.logger.severe("This server reports an ender chest size of " + reported + " even after it was"
-            + " widened to " + Nms.SIX_ROWS + ", which means it will only ever save " + reported
-            + " slots. Anything players put below that is lost at the next save. Disabling the plugin"
-            + " and reporting this server build would be wise.");
+        // Put it back to three rows before anything can be placed in rows that would be eaten. A
+        // three-row ender chest is a bug report; a six-row one that truncates on save is lost items.
+        this.nms.resizeTo(container, Nms.THREE_ROWS);
+        if (!this.sizeMismatchLogged) {
+            this.sizeMismatchLogged = true;
+            this.logger.severe("This server reports an ender chest size of " + reported + " even after"
+                + " it was widened to " + Nms.SIX_ROWS + ", so it would only ever save " + reported
+                + " slots. Ender chests are being left at three rows and the plugin is disabling"
+                + " itself rather than eating what players put below that row.");
+            this.onUnsupported.run();
+        }
+        return false;
     }
 
     /**
@@ -451,11 +498,31 @@ final class EnderChestStore {
         }
     }
 
-    /** Whether the container's first three rows are completely empty. */
-    private boolean lowerRowsEmpty(Object container) throws ReflectiveOperationException {
+    /**
+     * Whether this tag is the save the server loaded, judged by the rows the server already filled.
+     *
+     * <p>The file is only a safe source for rows 4-6 if it agrees with the live container about rows
+     * 1-3, because those the server loaded itself, out of the one file it chose. {@link #read} walks
+     * several candidates — the current save, the {@code .dat_old} copy from the save before it, and
+     * the offline-UUID copies — and nothing else establishes that it landed on the same one. An older
+     * copy still holds items the player has since moved into their inventory, and restoring rows 4-6
+     * out of it would hand them a second copy.
+     *
+     * <p>The comparison is occupancy per slot rather than item equality: it is cheap, and a stale copy
+     * differs in which slots are filled long before it differs only in what fills them.
+     */
+    private boolean agreesWithContainer(Object container, List<Object> entries)
+        throws ReflectiveOperationException {
+        boolean[] fileHasItem = new boolean[Nms.THREE_ROWS];
+        for (Object entry : entries) {
+            int slot = slotOf(entry);
+            if (slot >= 0 && slot < Nms.THREE_ROWS) {
+                fileHasItem[slot] = true;
+            }
+        }
         for (int slot = 0; slot < Nms.THREE_ROWS; slot++) {
-            if (!this.nms.isSlotEmpty(container, slot)) {
-                return false;
+            if (fileHasItem[slot] == this.nms.isSlotEmpty(container, slot)) {
+                return false; // One has an item where the other does not.
             }
         }
         return true;
@@ -495,9 +562,14 @@ final class EnderChestStore {
         Path source = sources.get(0);
         try {
             Files.createDirectories(this.recoveryDirectory);
-            Path target = this.recoveryDirectory.resolve(
-                uuid + "-" + reason + "-" + Instant.now().toEpochMilli() + ".dat");
-            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+            // One copy per reason, not one per join. These conditions persist, so a player who
+            // rejoins repeatedly would otherwise fill the disk with copies of their own playerdata,
+            // and a full disk costs every save on the server, not just rows 4-6.
+            Path target = this.recoveryDirectory.resolve(uuid + "-" + reason + ".dat");
+            if (Files.exists(target)) {
+                return;
+            }
+            Files.copy(source, target);
             this.logger.severe("Saved a copy of " + uuid + "'s playerdata to " + target
                 + " before it is overwritten. Rows 4-6 can be recovered from it.");
         } catch (IOException e) {
