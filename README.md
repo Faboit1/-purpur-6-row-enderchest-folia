@@ -103,12 +103,14 @@ did; the server loads them itself, before this plugin is involved at all. The pl
 container from 27 slots to 54, keeping what is already in it, and rows 4-6 start out empty. Players
 keep everything they had and gain three empty rows underneath.
 
-Rows 1-3 are deliberately left exactly as the server loaded them rather than re-read from disk, so a
-plugin that adjusts someone's ender chest during login isn't silently overruled. The one exception is
-a backstop: if the container's first three rows come up *completely* empty while the playerdata says
-they should not be, the plugin fills them from the file and logs a warning. That is what a failed load
-looks like — the server reading a different copy of the playerdata than this plugin found, or giving
-up on the file — and it is not something an ordinary mid-login edit produces.
+Rows 1-3 are never written by the plugin. The server has already loaded them, and re-reading them from
+disk would overrule any plugin that adjusted the chest during login — and, worse, would hand items back
+to a player who had already taken them out, if the copy on disk were older than the one the server read.
+
+They are read, though, as a safety check. Before restoring rows 4-6, the plugin compares rows 1-3 in the
+file against the live chest. If they disagree, the file is not the save the server loaded, so restoring
+out of it would duplicate items; the plugin refuses, logs, and copies the file to `recovery/` instead.
+Losing rows 4-6 for one join is recoverable. Duplicating items is not.
 
 ### From Purpur
 

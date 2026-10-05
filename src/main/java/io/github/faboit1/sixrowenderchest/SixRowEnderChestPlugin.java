@@ -13,6 +13,7 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -30,9 +31,15 @@ import java.util.logging.Level;
  */
 public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener {
 
+    /** Shortest gap between two ender chest opens by the same player. */
+    private static final long OPEN_COOLDOWN_MILLIS = 250L;
+
     private Nms nms;
     private EnderChestStore store;
     private boolean openFailureLogged;
+
+    /** Last open per player, so a held right-click cannot drive repeated reflection and disk reads. */
+    private final java.util.Map<java.util.UUID, Long> lastOpen = new java.util.concurrent.ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
@@ -59,7 +66,8 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
             getLogger().info("Your config.yml predates the 'debug' option. To enable diagnostics, add"
                 + " a line reading 'debug: true' to it, or delete the file to regenerate it.");
         }
-        this.store = new EnderChestStore(this.nms, getLogger(), getDataFolder().toPath(), debug);
+        this.store = new EnderChestStore(this.nms, getLogger(), getDataFolder().toPath(), debug,
+            () -> getServer().getPluginManager().disablePlugin(this));
         getServer().getPluginManager().registerEvents(this, this);
     }
 
@@ -73,7 +81,22 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
         if (event.getLoginResult() == AsyncPlayerPreLoginEvent.Result.ALLOWED) {
             this.store.prefetch(event.getUniqueId(), event.getName());
+        } else {
+            // Refused after another plugin had a say. Nothing will claim a snapshot for them.
+            this.store.forget(event.getUniqueId());
         }
+    }
+
+    /**
+     * Releases what was held for the player.
+     *
+     * <p>A login that never becomes a join, or a join that ends, otherwise leaves its pre-read
+     * playerdata on the heap until an unrelated login happens to evict it.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent event) {
+        this.store.forget(event.getPlayer().getUniqueId());
+        this.lastOpen.remove(event.getPlayer().getUniqueId());
     }
 
     /**
@@ -113,6 +136,13 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
         if (player.getGameMode() == GameMode.SPECTATOR) {
             return;
         }
+        Long previous = this.lastOpen.get(player.getUniqueId());
+        long now = System.currentTimeMillis();
+        if (previous != null && now - previous < OPEN_COOLDOWN_MILLIS) {
+            // Leave the event alone rather than cancelling: a dropped open is better than a vanilla
+            // three-row chest, and better than letting a macro drive a disk read per click.
+            return;
+        }
         // Vanilla: sneaking with something in either hand places that item instead of opening.
         if (player.isSneaking() && !(isEmpty(player.getInventory().getItemInMainHand())
             && isEmpty(player.getInventory().getItemInOffHand()))) {
@@ -123,6 +153,7 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
             return;
         }
 
+        this.lastOpen.put(player.getUniqueId(), now);
         boolean opened;
         try {
             // Covers the rare case of a join that was missed (a plugin reload under online players).
