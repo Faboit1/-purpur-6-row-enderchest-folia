@@ -10,6 +10,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.inventory.InventoryOpenEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -37,6 +39,7 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
     private Nms nms;
     private EnderChestStore store;
     private boolean openFailureLogged;
+    private boolean widenOnOpenFailureLogged;
 
     /** Last open per player, so a held right-click cannot drive repeated reflection and disk reads. */
     private final java.util.Map<java.util.UUID, Long> lastOpen = new java.util.concurrent.ConcurrentHashMap<>();
@@ -106,6 +109,36 @@ public final class SixRowEnderChestPlugin extends JavaPlugin implements Listener
     @EventHandler(priority = EventPriority.LOWEST)
     public void onJoin(PlayerJoinEvent event) {
         this.store.applySixRows(event.getPlayer());
+    }
+
+    /**
+     * Widens any ender chest that is about to be viewed, whoever it belongs to.
+     *
+     * <p>Widening otherwise only happens for an online player, at join or when they open a chest
+     * themselves. A plugin that opens an <em>offline</em> player's ender chest — an admin view, a vault
+     * manager — gets a freshly built 27-slot container, and if that view is then saved,
+     * {@code storeAsSlots} writes 27 entries and rows 4-6 are gone, with nothing in this plugin's log
+     * because it never saw it happen.
+     *
+     * <p>The menu has already been sized by the time this fires, so a view opened as three rows stays
+     * three rows and rows 4-6 are simply not shown in it. That is the point: the container no longer
+     * truncates when the server saves it. A hidden row is recoverable, a dropped one is not.
+     */
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onInventoryOpen(InventoryOpenEvent event) {
+        if (event.getInventory().getType() != InventoryType.ENDER_CHEST
+            || event.getInventory().getSize() == Nms.SIX_ROWS) {
+            return;
+        }
+        try {
+            this.nms.resizeToSixRows(this.nms.containerOf(event.getInventory()));
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            if (!this.widenOnOpenFailureLogged) {
+                this.widenOnOpenFailureLogged = true;
+                getLogger().log(Level.WARNING, "Could not widen an ender chest being opened by another"
+                    + " plugin; rows 4-6 may be dropped when it is saved.", e);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ opening
