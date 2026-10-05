@@ -73,6 +73,7 @@ the two writes is precisely how "6-row ender chest" plugins dupe.
 |---|---|
 | `AsyncPlayerPreLoginEvent` | Reads and parses the player's `.dat` off-thread, while they are not yet online and nothing can be writing that file. |
 | `PlayerJoinEvent` (`LOWEST`) | Grows the live container to 54 slots in place and restores slots 27-53. Runs first, so every other plugin already sees 54 slots. |
+| `InventoryOpenEvent` (`LOWEST`) | Widens any ender chest another plugin is about to open, including an offline player's, so a view it saves cannot truncate rows 4-6. |
 | `PlayerInteractEvent` (`HIGH`) | Opens a real `ChestMenu.sixRows` over the container, the same call Purpur's patched `EnderChestBlock` makes. |
 
 The container is grown **in place** rather than replaced, because `CraftHumanEntity` caches one
